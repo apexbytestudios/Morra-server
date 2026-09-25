@@ -1,126 +1,146 @@
-import asyncio
+import os
 import json
-import websockets
+import socket
+import threading
 
-ROOMS = {}
+PORT = int(os.environ.get("PORT", 10000))
+rooms = {}  # { room_code: { "pass": str, "players": [conn1, conn2], "names": [name1, name2], "punti": int, "moves": {}, "scores": {} } }
 
-async def handle_client(websocket):
-    current_room = None
+def send_json(conn, payload):
     try:
-        async for message in websocket:
-            data = json.loads(message)
-            msg_type = data.get("type")
+        conn.sendall((json.dumps(payload) + "\n").encode('utf-8'))
+    except Exception:
+        pass
 
-            # 1. Creazione Stanza
-            if msg_type == "create_room":
-                room = data.get("room", "").strip()
-                pw = data.get("password", "").strip()
-                pname = data.get("player_name", "").strip()
-                punti = int(data.get("punti", 5))
+def handle_client(conn, addr):
+    room_code = None
+    player_name = None
 
-                if not room or not pw:
-                    await websocket.send(json.dumps({"type": "error", "msg": "Nome stanza e password obbligatori!"}))
-                    continue
+    try:
+        buf = bytearray()
+        while True:
+            c = conn.recv(1)
+            if not c or c == b'\n':
+                break
+            buf.extend(c)
 
-                if room in ROOMS:
-                    await websocket.send(json.dumps({"type": "error", "msg": "Nome stanza già occupato!"}))
-                else:
-                    ROOMS[room] = {
-                        "password": pw,
-                        "p1": websocket, "p1_name": pname,
-                        "p2": None, "p2_name": None,
-                        "punti": punti, "p1_move": None, "p2_move": None,
-                        "p1_score": 0, "p2_score": 0
-                    }
-                    current_room = room
-                    await websocket.send(json.dumps({"type": "created", "room": room}))
+        if not buf:
+            conn.close()
+            return
 
-            # 2. Accesso Stanza
-            elif msg_type == "join_room":
-                room = data.get("room", "").strip()
-                pw = data.get("password", "").strip()
-                pname = data.get("player_name", "").strip()
+        data = json.loads(buf.decode('utf-8'))
+        if data.get("type") == "join":
+            room_code = data.get("room_code")
+            room_pass = data.get("room_pass")
+            player_name = data.get("player_name", "Giocatore")
+            punti = data.get("punti_vittoria", 5)
 
-                if room not in ROOMS:
-                    await websocket.send(json.dumps({"type": "error", "msg": "Stanza non trovata!"}))
-                elif ROOMS[room]["password"] != pw:
-                    await websocket.send(json.dumps({"type": "error", "msg": "Password errata!"}))
-                elif ROOMS[room]["p2"] is not None:
-                    await websocket.send(json.dumps({"type": "error", "msg": "Stanza piena!"}))
-                else:
-                    ROOMS[room]["p2"] = websocket
-                    ROOMS[room]["p2_name"] = pname
-                    current_room = room
+            if not room_code or not room_pass:
+                send_json(conn, {"type": "error", "msg": "Nome stanza e password richiesti."})
+                conn.close()
+                return
 
-                    r = ROOMS[room]
-                    await r["p1"].send(json.dumps({"type": "start", "role": "p1", "p1_name": r["p1_name"], "p2_name": r["p2_name"], "punti": r["punti"]}))
-                    await r["p2"].send(json.dumps({"type": "start", "role": "p2", "p1_name": r["p1_name"], "p2_name": r["p2_name"], "punti": r["punti"]}))
+            if room_code not in rooms:
+                # Crea nuova stanza privata
+                rooms[room_code] = {
+                    "pass": room_pass,
+                    "players": [(conn, player_name)],
+                    "punti": punti,
+                    "moves": {},
+                    "scores": {player_name: 0}
+                }
+            else:
+                # Verifica password e capienza
+                r = rooms[room_code]
+                if r["pass"] != room_pass:
+                    send_json(conn, {"type": "error", "msg": "Password stanza errata!"})
+                    conn.close()
+                    return
 
-            # 3. Gestione Mosse
-            elif msg_type == "move" and current_room in ROOMS:
-                r = ROOMS[current_room]
-                x, y = data.get("x"), data.get("y")
+                if len(r["players"]) >= 2:
+                    send_json(conn, {"type": "error", "msg": "La stanza e' gia' piena!"})
+                    conn.close()
+                    return
 
-                if websocket == r["p1"]:
-                    r["p1_move"] = (x, y)
-                elif websocket == r["p2"]:
-                    r["p2_move"] = (x, y)
+                r["players"].append((conn, player_name))
+                r["scores"][player_name] = 0
 
-                if r["p1_move"] is not None and r["p2_move"] is not None:
-                    x1, y1 = r["p1_move"]
-                    x2, y2 = r["p2_move"]
-                    somma = x1 + x2
+                # Entrambi i giocatori sono connessi -> Avvio partita
+                p1_conn, p1_name = r["players"][0]
+                p2_conn, p2_name = r["players"][1]
 
-                    if y1 == somma and y2 != somma:
-                        r["p1_score"] += 1
-                    elif y2 == somma and y1 != somma:
-                        r["p2_score"] += 1
+                send_json(p1_conn, {"type": "init", "opponent_name": p2_name, "punti_vittoria": r["punti"]})
+                send_json(p2_conn, {"type": "init", "opponent_name": p1_name, "punti_vittoria": r["punti"]})
 
-                    punti_obj = r["punti"]
-                    game_over, winner = False, None
+            # Loop principale della partita per questo client
+            while True:
+                buf = bytearray()
+                while True:
+                    c = conn.recv(1)
+                    if not c or c == b'\n':
+                        break
+                    buf.extend(c)
 
-                    in_spareggio = (r["p1_score"] >= punti_obj - 1) and (r["p2_score"] >= punti_obj - 1)
-                    if in_spareggio:
-                        if r["p1_score"] - r["p2_score"] >= 2:
-                            game_over, winner = True, r["p1_name"]
-                        elif r["p2_score"] - r["p1_score"] >= 2:
-                            game_over, winner = True, r["p2_name"]
-                    else:
-                        if r["p1_score"] >= punti_obj:
-                            game_over, winner = True, r["p1_name"]
-                        elif r["p2_score"] >= punti_obj:
-                            game_over, winner = True, r["p2_name"]
+                if not buf:
+                    break
 
-                    payload = json.dumps({
-                        "type": "round_result",
-                        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                        "somma": somma,
-                        "p1_score": r["p1_score"], "p2_score": r["p2_score"],
-                        "game_over": game_over, "winner": winner
-                    })
+                msg = json.loads(buf.decode('utf-8'))
+                if msg.get("type") == "move":
+                    r = rooms.get(room_code)
+                    if not r:
+                        break
 
-                    await r["p1"].send(payload)
-                    await r["p2"].send(payload)
-                    r["p1_move"], r["p2_move"] = None, None
+                    r["moves"][player_name] = {"dita": msg["dita"], "somma": msg["somma"]}
+
+                    # Se entrambi hanno inviato la mossa, calcola l'esito
+                    if len(r["moves"]) == 2:
+                        names = list(r["moves"].keys())
+                        m1 = r["moves"][names[0]]
+                        m2 = r["moves"][names[1]]
+                        totale = m1["dita"] + m2["dita"]
+
+                        win1 = (m1["somma"] == totale)
+                        win2 = (m2["somma"] == totale)
+
+                        if win1 and not win2:
+                            r["scores"][names[0]] += 1
+                            txt = f"Punto a {names[0]}!"
+                        elif win2 and not win1:
+                            r["scores"][names[1]] += 1
+                            txt = f"Punto a {names[1]}!"
+                        elif win1 and win2:
+                            txt = "Entrambi hanno indovinato! Nessun punto."
+                        else:
+                            txt = "Nessuno ha indovinato!"
+
+                        res = {
+                            "type": "round_result",
+                            "moves": r["moves"],
+                            "totale": totale,
+                            "scores": r["scores"],
+                            "esito_testo": txt
+                        }
+
+                        for p_conn, _ in r["players"]:
+                            send_json(p_conn, res)
+
+                        r["moves"] = {}
 
     except Exception:
         pass
     finally:
-        if current_room and current_room in ROOMS:
-            r = ROOMS[current_room]
-            msg_disc = json.dumps({"type": "disconnected"})
-            for ws in (r["p1"], r["p2"]):
-                if ws and ws != websocket:
-                    try:
-                        await ws.send(msg_disc)
-                    except Exception:
-                        pass
-            del ROOMS[current_room]
+        conn.close()
+        if room_code in rooms:
+            del rooms[room_code]
 
-async def main():
-    async with websockets.serve(handle_client, "0.0.0.0", 8765):
-        print(">>> SERVER ATTIVO SULLA PORTA 8765 <<<")
-        await asyncio.Future()
+def start():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("0.0.0.0", PORT))
+    server.listen(10)
+    print(f"Server Morra in ascolto sulla porta {PORT}...")
+    while True:
+        conn, addr = server.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    start()
