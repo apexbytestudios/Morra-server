@@ -1,10 +1,25 @@
 import os
 import json
 import asyncio
+from datetime import datetime
 import websockets
 
 PORT = int(os.environ.get("PORT", 10000))
+
 ROOMS = {}
+LEADERBOARD = []  # Salva le ultime 50 partite giocate
+
+def registra_partita_finita(room_code, vincitore, perdente, score_vincitore, score_perdente):
+    voce = {
+        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "vincitore": vincitore,
+        "perdente": perdente,
+        "punteggio": f"{score_vincitore}-{score_perdente}",
+        "stanza": room_code
+    }
+    LEADERBOARD.insert(0, voce)
+    if len(LEADERBOARD) > 50:
+        LEADERBOARD.pop()
 
 async def handle_client(websocket):
     room_code = None
@@ -14,7 +29,15 @@ async def handle_client(websocket):
             data = json.loads(message)
             msg_type = data.get("type")
 
-            if msg_type == "join":
+            # Richiesta della Leaderboard direttamente via WebSocket
+            if msg_type == "get_leaderboard":
+                await websocket.send(json.dumps({
+                    "type": "leaderboard_data",
+                    "data": LEADERBOARD
+                }))
+                continue
+
+            elif msg_type == "join":
                 room_code = data.get("room_code")
                 room_pass = data.get("room_pass")
                 player_name = data.get("player_name", "Giocatore")
@@ -31,7 +54,8 @@ async def handle_client(websocket):
                         "players": [(websocket, player_name)],
                         "punti": punti,
                         "moves": {},
-                        "scores": {player_name: 0}
+                        "scores": {player_name: 0},
+                        "finished": False
                     }
                 else:
                     r = ROOMS[room_code]
@@ -56,7 +80,7 @@ async def handle_client(websocket):
 
             elif msg_type == "move":
                 r = ROOMS.get(room_code)
-                if r:
+                if r and not r["finished"]:
                     r["moves"][player_name] = {"dita": data["dita"], "somma": data["somma"]}
                     if len(r["moves"]) == 2:
                         names = list(r["moves"].keys())
@@ -85,7 +109,19 @@ async def handle_client(websocket):
 
                         for p_ws, _ in r["players"]:
                             await p_ws.send(res)
+
                         r["moves"] = {}
+
+                        punti_target = r["punti"]
+                        p1_name, p2_name = names[0], names[1]
+                        s1, s2 = r["scores"][p1_name], r["scores"][p2_name]
+
+                        if s1 >= punti_target or s2 >= punti_target:
+                            r["finished"] = True
+                            if s1 >= punti_target:
+                                registra_partita_finita(room_code, p1_name, p2_name, s1, s2)
+                            else:
+                                registra_partita_finita(room_code, p2_name, p1_name, s2, s1)
     except Exception:
         pass
     finally:
@@ -93,9 +129,16 @@ async def handle_client(websocket):
             del ROOMS[room_code]
 
 async def main():
-    async with websockets.serve(handle_client, "0.0.0.0", PORT):
-        print(f"Server WebSocket attivo sulla porta {PORT}")
-        await asyncio.Future()
+    try:
+        print(f"--> Avvio server sulla porta {PORT}...", flush=True)
+        async with websockets.serve(handle_client, "0.0.0.0", PORT):
+            print(f"--> Server WebSocket pronto e attivo sulla porta {PORT}!", flush=True)
+            await asyncio.Future()  # Mantiene il server in esecuzione
+    except Exception as e:
+        print(f"--> CRASH DEL SERVER: {e}", flush=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"--> ERRORE INIZIALIZZAZIONE: {e}", flush=True)
