@@ -122,6 +122,20 @@ async def handle_client(websocket):
                                 registra_partita_finita(room_code, p1_name, p2_name, s1, s2)
                             else:
                                 registra_partita_finita(room_code, p2_name, p1_name, s2, s1)
+                                
+            elif msg_type == "chat":
+                r = ROOMS.get(room_code)
+                if r:
+                    testo = data.get("msg", "")
+                    if testo:
+                        payload = json.dumps({
+                            "type": "chat_msg",
+                            "sender": player_name,
+                            "msg": testo
+                        })
+                        # Invia il messaggio a entrambi i giocatori presenti nella stanza
+                        for p_ws, _ in r["players"]:
+                            await p_ws.send(payload)        
     except Exception:
         pass
     finally:
