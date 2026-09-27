@@ -153,6 +153,11 @@ async def handle_client(websocket):
                         })
                         for p_ws, _ in r["players"]:
                             await p_ws.send(payload)
+
+            # Gestione esplicita del messaggio di abbandono dal client
+            elif msg_type == "leave":
+                break
+
     except Exception:
         pass
     finally:
@@ -161,17 +166,19 @@ async def handle_client(websocket):
             # Rimuove il client che si è disconnesso
             r["players"] = [p for p in r["players"] if p[0] != websocket]
             
-            # Se rimane 1 giocatore, gli notifichiamo l'abbandono e chiudiamo la stanza
+            # Se rimane 1 giocatore, gli notifichiamo l'abbandono e rimuoviamo la stanza
             if len(r["players"]) == 1:
                 remaining_ws, _ = r["players"][0]
                 try:
-                    # Invia l'avviso asincrono
-                    asyncio.create_task(remaining_ws.send(json.dumps({
-                        "type": "player_left",
-                        "player_name": player_name or "L'avversario"
-                    })))
+                    await remaining_ws.send(json.dumps({
+                        "type": "opponent_left",
+                        "player_name": player_name or "L'avversario",
+                        "message": f"{player_name or 'L\'avversario'} ha abbandonato la partita."
+                    }))
                 except Exception:
                     pass
+                # Elimina la stanza dopo aver notificato il giocatore rimasto
+                del ROOMS[room_code]
             elif len(r["players"]) == 0:
                 del ROOMS[room_code]
 
