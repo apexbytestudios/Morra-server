@@ -73,7 +73,8 @@ async def handle_client(websocket):
                         "punti": punti,
                         "moves": {},
                         "scores": {player_name: 0},
-                        "finished": False
+                        "finished": False,
+                        "restart_requests": set()
                     }
                 else:
                     r = ROOMS[room_code]
@@ -140,6 +141,36 @@ async def handle_client(websocket):
                                 registra_partita_finita(room_code, p1_name, p2_name, s1, s2)
                             else:
                                 registra_partita_finita(room_code, p2_name, p1_name, s2, s1)
+
+            # --- GESTIONE RIVINCIATA / NUOVA PARTITA ---
+            elif msg_type == "restart_request":
+                r = ROOMS.get(room_code)
+                if r and r["finished"]:
+                    r.setdefault("restart_requests", set()).add(player_name)
+                    
+                    # Notifica gli altri che il giocatore ha chiesto la rivincita
+                    payload_req = json.dumps({
+                        "type": "restart_requested_by",
+                        "player_name": player_name
+                    })
+                    for p_ws, p_n in r["players"]:
+                        if p_n != player_name:
+                            await p_ws.send(payload_req)
+
+                    # Se entrambi hanno richiesto la nuova partita
+                    if len(r["restart_requests"]) >= 2:
+                        r["finished"] = False
+                        r["moves"] = {}
+                        r["restart_requests"].clear()
+                        for p_n in r["scores"]:
+                            r["scores"][p_n] = 0
+
+                        payload_start = json.dumps({
+                            "type": "restart_game",
+                            "scores": r["scores"]
+                        })
+                        for p_ws, _ in r["players"]:
+                            await p_ws.send(payload_start)
 
             elif msg_type == "chat":
                 r = ROOMS.get(room_code)
