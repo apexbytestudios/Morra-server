@@ -37,6 +37,24 @@ async def handle_client(websocket):
                 }))
                 continue
 
+            # Richiesta dell'elenco delle stanze in attesa
+            elif msg_type == "get_rooms":
+                waiting_rooms = []
+                for r_code, r in ROOMS.items():
+                    if len(r["players"]) == 1:
+                        host_name = r["players"][0][1]
+                        waiting_rooms.append({
+                            "room_code": r_code,
+                            "host": host_name,
+                            "punti_vittoria": r.get("punti", 5),
+                            "has_password": bool(r.get("pass"))
+                        })
+                await websocket.send(json.dumps({
+                    "type": "rooms_list",
+                    "rooms": waiting_rooms
+                }))
+                continue
+
             elif msg_type == "join":
                 room_code = data.get("room_code")
                 room_pass = data.get("room_pass")
@@ -122,7 +140,7 @@ async def handle_client(websocket):
                                 registra_partita_finita(room_code, p1_name, p2_name, s1, s2)
                             else:
                                 registra_partita_finita(room_code, p2_name, p1_name, s2, s1)
-                                
+
             elif msg_type == "chat":
                 r = ROOMS.get(room_code)
                 if r:
@@ -133,21 +151,25 @@ async def handle_client(websocket):
                             "sender": player_name,
                             "msg": testo
                         })
-                        # Invia il messaggio a entrambi i giocatori presenti nella stanza
                         for p_ws, _ in r["players"]:
-                            await p_ws.send(payload)        
+                            await p_ws.send(payload)
     except Exception:
         pass
     finally:
+        # Rimuove il giocatore dalla stanza in modo corretto senza eliminare la stanza subito
         if room_code in ROOMS:
-            del ROOMS[room_code]
+            r = ROOMS[room_code]
+            r["players"] = [p for p in r["players"] if p[0] != websocket]
+            # Se la stanza e' vuota, elimina la stanza
+            if len(r["players"]) == 0:
+                del ROOMS[room_code]
 
 async def main():
     try:
         print(f"--> Avvio server sulla porta {PORT}...", flush=True)
         async with websockets.serve(handle_client, "0.0.0.0", PORT):
             print(f"--> Server WebSocket pronto e attivo sulla porta {PORT}!", flush=True)
-            await asyncio.Future()  # Mantiene il server in esecuzione
+            await asyncio.Future()
     except Exception as e:
         print(f"--> CRASH DEL SERVER: {e}", flush=True)
 
