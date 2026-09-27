@@ -141,6 +141,7 @@ async def handle_client(websocket):
                                 registra_partita_finita(room_code, p1_name, p2_name, s1, s2)
                             else:
                                 registra_partita_finita(room_code, p2_name, p1_name, s2, s1)
+                            # NON chiamare 'del ROOMS[room_code]' qui! La stanza deve rimanere viva per la rivincita.
 
             # --- GESTIONE RIVINCIATA / NUOVA PARTITA ---
             elif msg_type == "restart_request":
