@@ -156,12 +156,24 @@ async def handle_client(websocket):
     except Exception:
         pass
     finally:
-        # Rimuove il giocatore dalla stanza in modo corretto senza eliminare la stanza subito
+        # Gestione disconnessione ed avviso all'avversario
         if room_code in ROOMS:
             r = ROOMS[room_code]
+            # Rimuove il client che si è disconnesso
             r["players"] = [p for p in r["players"] if p[0] != websocket]
-            # Se la stanza e' vuota, elimina la stanza
-            if len(r["players"]) == 0:
+            
+            # Se rimane 1 giocatore, gli notifica che l'avversario ha abbandonato
+            if len(r["players"]) == 1:
+                remaining_ws, _ = r["players"][0]
+                try:
+                    await remaining_ws.send(json.dumps({
+                        "type": "player_left",
+                        "player_name": player_name or "L'avversario"
+                    }))
+                except Exception:
+                    pass
+            # Se la stanza è vuota, la elimina
+            elif len(r["players"]) == 0:
                 del ROOMS[room_code]
 
 async def main():
